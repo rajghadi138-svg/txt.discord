@@ -1,0 +1,26 @@
+# Render Blueprint for the Dispatcher self-bot (FREE tier).
+#
+# How to use:
+#   1. Put these three files in your repo root: render.yaml, requirements.txt, app.py
+#   2. Push to GitHub.
+#   3. In Render: New +  ->  Blueprint  ->  pick this repo. Render reads this
+#      file and creates the service for you.
+#   4. After it's created, open the service -> Environment, and set the secrets:
+#         DISCORD_TOKEN       (required) your user token
+#         DASHBOARD_PASSWORD  (recommended) any password to lock the web panel
+#
+# Render injects PORT automatically; app.py already binds 0.0.0.0:$PORT.
+
+services:
+  - type: web
+    name: dispatcher-selfbot
+    runtime: python
+    plan: free
+    buildCommand: pip install -r requirements.txt
+    startCommand: python app.py
+    healthCheckPath: /healthz
+    envVars:
+      - key: DISCORD_TOKEN
+        sync: false
+      - key: DASHBOARD_PASSWORD
+        sync: false
