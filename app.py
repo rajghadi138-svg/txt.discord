@@ -186,8 +186,21 @@ class DispatcherCog(commands.Cog):
                 return
 
         channel = self.bot.get_channel(cfg["channel_id"]) if cfg["channel_id"] else None
+        if channel is None and cfg["channel_id"]:
+            # Not in cache — resolve it directly via the API. Catches cache-timing
+            # issues, and gives a clearer reason when it genuinely can't be reached.
+            try:
+                channel = await self.bot.fetch_channel(cfg["channel_id"])
+            except discord.NotFound:
+                self._error = ("channel ID not found — double-check the ID, and make "
+                               "sure this account is a member of that server")
+            except discord.Forbidden:
+                self._error = "no access to that channel — this account can't view it"
+            except discord.HTTPException as e:
+                self._error = f"couldn't resolve channel: {e}"
         if channel is None:
-            self._error = "channel not found — check the channel ID / bot access"
+            if not self._error:
+                self._error = "channel not found — set a valid channel ID"
             cfg["running"] = False
             write_config(cfg)
             self.push_status()
@@ -252,579 +265,531 @@ DASHBOARD_HTML = """
 <!DOCTYPE html>
 <html lang="en">
 <head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Dispatcher — Self-Bot Control Panel</title>
-    <style>
-        :root {
-            --bg: #0f0f1a;
-            --surface: #1a1a2e;
-            --surface-hover: #252542;
-            --border: #2d2d44;
-            --text: #e0e0e0;
-            --text-muted: #8888a0;
-            --accent: #5865f2;
-            --accent-hover: #4752c4;
-            --danger: #ed4245;
-            --danger-hover: #c03537;
-            --success: #57f287;
-            --warning: #fee75c;
-            --radius: 8px;
-            --font: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
-        }
-        * { margin: 0; padding: 0; box-sizing: border-box; }
-        body {
-            background: var(--bg);
-            color: var(--text);
-            font-family: var(--font);
-            line-height: 1.5;
-            min-height: 100vh;
-        }
-        .container {
-            max-width: 1200px;
-            margin: 0 auto;
-            padding: 20px;
-        }
-        header {
-            text-align: center;
-            padding: 30px 0;
-            border-bottom: 1px solid var(--border);
-            margin-bottom: 30px;
-        }
-        header h1 { font-size: 2rem; color: var(--accent); margin-bottom: 5px; }
-        header p { color: var(--text-muted); font-size: 0.9rem; }
-        .grid {
-            display: grid;
-            grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
-            gap: 20px;
-            margin-bottom: 20px;
-        }
-        .card {
-            background: var(--surface);
-            border: 1px solid var(--border);
-            border-radius: var(--radius);
-            padding: 20px;
-        }
-        .card h2 {
-            font-size: 1.1rem;
-            color: var(--accent);
-            margin-bottom: 15px;
-            display: flex;
-            align-items: center;
-            gap: 8px;
-        }
-        .status-indicator {
-            display: inline-block;
-            width: 10px;
-            height: 10px;
-            border-radius: 50%;
-            background: var(--danger);
-            margin-left: auto;
-        }
-        .status-indicator.on { background: var(--success); box-shadow: 0 0 8px var(--success); }
-        .status-indicator.warn { background: var(--warning); }
-        .form-group { margin-bottom: 15px; }
-        label {
-            display: block;
-            font-size: 0.85rem;
-            color: var(--text-muted);
-            margin-bottom: 5px;
-            text-transform: uppercase;
-            letter-spacing: 0.5px;
-        }
-        input, select, textarea {
-            width: 100%;
-            background: var(--bg);
-            border: 1px solid var(--border);
-            border-radius: var(--radius);
-            color: var(--text);
-            padding: 10px 12px;
-            font-family: inherit;
-            font-size: 0.95rem;
-            transition: border-color 0.2s;
-        }
-        input:focus, select:focus, textarea:focus {
-            outline: none;
-            border-color: var(--accent);
-        }
-        textarea {
-            min-height: 200px;
-            resize: vertical;
-            font-family: 'Consolas', 'Monaco', monospace;
-            font-size: 0.85rem;
-            line-height: 1.6;
-        }
-        .row { display: flex; gap: 10px; }
-        .row .form-group { flex: 1; }
-        .btn {
-            display: inline-flex;
-            align-items: center;
-            justify-content: center;
-            gap: 6px;
-            padding: 10px 18px;
-            border: none;
-            border-radius: var(--radius);
-            font-family: inherit;
-            font-size: 0.9rem;
-            font-weight: 500;
-            cursor: pointer;
-            transition: all 0.15s;
-            color: white;
-        }
-        .btn-primary { background: var(--accent); }
-        .btn-primary:hover { background: var(--accent-hover); }
-        .btn-danger { background: var(--danger); }
-        .btn-danger:hover { background: var(--danger-hover); }
-        .btn-success { background: #248046; }
-        .btn-success:hover { background: #1a6334; }
-        .btn-sm { padding: 6px 12px; font-size: 0.8rem; }
-        .btn-group { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 10px; }
-        .file-list {
-            max-height: 300px;
-            overflow-y: auto;
-        }
-        .file-item {
-            display: flex;
-            align-items: center;
-            justify-content: space-between;
-            padding: 10px 12px;
-            background: var(--bg);
-            border: 1px solid var(--border);
-            border-radius: var(--radius);
-            margin-bottom: 8px;
-            cursor: pointer;
-            transition: all 0.15s;
-        }
-        .file-item:hover { background: var(--surface-hover); }
-        .file-item.active {
-            border-color: var(--accent);
-            background: rgba(88, 101, 242, 0.1);
-        }
-        .file-item .name { font-weight: 500; }
-        .file-item .meta { font-size: 0.8rem; color: var(--text-muted); }
-        .file-item .actions { display: flex; gap: 5px; }
-        .feed {
-            max-height: 300px;
-            overflow-y: auto;
-            font-family: 'Consolas', monospace;
-            font-size: 0.8rem;
-        }
-        .feed-item {
-            padding: 8px 10px;
-            border-bottom: 1px solid var(--border);
-            display: flex;
-            gap: 10px;
-        }
-        .feed-item .time { color: var(--text-muted); min-width: 60px; }
-        .feed-item .text { color: var(--text); word-break: break-word; }
-        .feed-empty { color: var(--text-muted); text-align: center; padding: 20px; }
-        .error-box {
-            background: rgba(237, 66, 69, 0.1);
-            border: 1px solid var(--danger);
-            color: var(--danger);
-            padding: 10px 12px;
-            border-radius: var(--radius);
-            font-size: 0.85rem;
-            margin-top: 10px;
-        }
-        .progress-bar {
-            width: 100%;
-            height: 6px;
-            background: var(--bg);
-            border-radius: 3px;
-            margin-top: 10px;
-            overflow: hidden;
-        }
-        .progress-bar .fill {
-            height: 100%;
-            background: var(--accent);
-            border-radius: 3px;
-            transition: width 0.3s;
-        }
-        .stats {
-            display: grid;
-            grid-template-columns: repeat(3, 1fr);
-            gap: 10px;
-            margin-top: 15px;
-        }
-        .stat {
-            text-align: center;
-            padding: 10px;
-            background: var(--bg);
-            border-radius: var(--radius);
-        }
-        .stat .value { font-size: 1.3rem; font-weight: 600; color: var(--accent); }
-        .stat .label { font-size: 0.75rem; color: var(--text-muted); margin-top: 2px; }
-        .hidden { display: none; }
-        .drop-zone {
-            border: 2px dashed var(--border);
-            border-radius: var(--radius);
-            padding: 30px;
-            text-align: center;
-            color: var(--text-muted);
-            transition: all 0.2s;
-            cursor: pointer;
-        }
-        .drop-zone:hover, .drop-zone.dragover {
-            border-color: var(--accent);
-            background: rgba(88, 101, 242, 0.05);
-        }
-        input[type="file"] { display: none; }
-        ::-webkit-scrollbar { width: 8px; }
-        ::-webkit-scrollbar-track { background: var(--bg); }
-        ::-webkit-scrollbar-thumb { background: var(--border); border-radius: 4px; }
-        ::-webkit-scrollbar-thumb:hover { background: var(--text-muted); }
-    </style>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Dispatcher · Control Panel</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;600;700&family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet">
+<style>
+:root{
+  --base:#1e1e2e; --mantle:#181825; --crust:#11111b;
+  --surface0:#313244; --surface1:#45475a; --surface2:#585b70;
+  --overlay0:#6c7086; --overlay1:#7f849c;
+  --subtext0:#a6adc8; --subtext1:#bac2de; --text:#cdd6f4;
+  --mauve:#cba6f7; --lavender:#b4befe; --blue:#89b4fa; --sapphire:#74c7ec; --teal:#94e2d5;
+  --green:#a6e3a1; --yellow:#f9e2af; --peach:#fab387; --red:#f38ba8; --pink:#f5c2e7;
+  --glass: rgba(49,50,68,0.42);
+  --glass-line: rgba(203,166,247,0.14);
+  --radius: 18px;
+  --shadow: 0 10px 34px rgba(17,17,27,0.5), inset 0 1px 0 rgba(255,255,255,0.04);
+  --display:'Space Grotesk', sans-serif;
+  --body:'Inter', sans-serif;
+  --mono:'JetBrains Mono', monospace;
+}
+*{margin:0;padding:0;box-sizing:border-box}
+html{scroll-behavior:smooth}
+body{
+  background:var(--crust); color:var(--text);
+  font-family:var(--body); line-height:1.5; min-height:100vh;
+  -webkit-font-smoothing:antialiased;
+}
+body::before{
+  content:''; position:fixed; inset:-10%; z-index:-1;
+  background:
+    radial-gradient(55% 45% at 12% 8%,  rgba(203,166,247,0.20), transparent 62%),
+    radial-gradient(50% 42% at 88% 12%, rgba(137,180,250,0.18), transparent 62%),
+    radial-gradient(55% 50% at 82% 92%, rgba(148,226,213,0.13), transparent 62%),
+    radial-gradient(50% 45% at 8% 90%,  rgba(245,194,231,0.13), transparent 62%),
+    var(--crust);
+  animation:drift 24s ease-in-out infinite alternate;
+}
+@keyframes drift{from{transform:translate3d(0,0,0) scale(1)}to{transform:translate3d(0,-2.5%,0) scale(1.06)}}
+@media (prefers-reduced-motion:reduce){body::before{animation:none}}
+
+.wrap{max-width:1240px;margin:0 auto;padding:28px 22px 64px}
+
+/* ---- header ---- */
+header{
+  display:flex;justify-content:space-between;align-items:flex-start;gap:24px;
+  padding:22px 26px;margin-bottom:26px;
+  background:var(--glass);backdrop-filter:blur(18px) saturate(150%);-webkit-backdrop-filter:blur(18px) saturate(150%);
+  border:1px solid var(--glass-line);border-radius:var(--radius);box-shadow:var(--shadow);
+}
+.brand{display:flex;align-items:center;gap:14px}
+.logo{
+  width:46px;height:46px;border-radius:14px;flex:none;
+  background:linear-gradient(135deg,var(--mauve),var(--blue));
+  display:grid;place-items:center;font-size:22px;
+  box-shadow:0 6px 18px rgba(203,166,247,0.35);
+}
+.brand h1{font-family:var(--display);font-size:1.5rem;font-weight:700;letter-spacing:-0.02em}
+.brand p{font-family:var(--mono);font-size:0.72rem;color:var(--overlay1);letter-spacing:0.08em;text-transform:uppercase;margin-top:2px}
+.head-right{display:flex;flex-direction:column;align-items:flex-end;gap:10px}
+.clock{font-family:var(--mono);font-weight:700;font-size:2.1rem;line-height:1;color:var(--mauve);letter-spacing:0.04em;text-shadow:0 0 22px rgba(203,166,247,0.45)}
+.clock-date{font-family:var(--mono);font-size:0.74rem;color:var(--subtext0);letter-spacing:0.12em;text-transform:uppercase;margin-top:-4px}
+.pill{display:inline-flex;align-items:center;gap:8px;padding:6px 13px;border-radius:999px;font-family:var(--mono);font-size:0.78rem;font-weight:500;border:1px solid transparent}
+.pill::before{content:'';width:8px;height:8px;border-radius:50%}
+.pill-on{color:var(--green);background:rgba(166,227,161,0.1);border-color:rgba(166,227,161,0.28)}
+.pill-on::before{background:var(--green);box-shadow:0 0 9px var(--green)}
+.pill-off{color:var(--red);background:rgba(243,139,168,0.1);border-color:rgba(243,139,168,0.28)}
+.pill-off::before{background:var(--red)}
+
+/* ---- grid + cards ---- */
+.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(330px,1fr));gap:22px;margin-bottom:22px}
+.card{
+  background:var(--glass);backdrop-filter:blur(16px) saturate(150%);-webkit-backdrop-filter:blur(16px) saturate(150%);
+  border:1px solid var(--glass-line);border-radius:var(--radius);box-shadow:var(--shadow);padding:22px;
+}
+.card h2{font-family:var(--display);font-size:1.05rem;font-weight:600;margin-bottom:18px;display:flex;align-items:center;gap:9px}
+.card h2 .ic{font-size:1.05rem}
+.card h2 .spacer{margin-left:auto}
+
+/* ---- run state ---- */
+.run-state{display:flex;align-items:center;gap:11px;padding:13px 16px;border-radius:14px;margin-bottom:18px;border:1px solid transparent}
+.run-state .dot{width:11px;height:11px;border-radius:50%;flex:none}
+.run-label{font-family:var(--display);font-weight:600;font-size:1.05rem}
+.run-sub{font-family:var(--mono);font-size:0.72rem;color:var(--overlay1);margin-left:auto}
+.run-state.running{background:rgba(166,227,161,0.09);border-color:rgba(166,227,161,0.25)}
+.run-state.running .dot{background:var(--green);box-shadow:0 0 10px var(--green);animation:pulse 1.6s ease-in-out infinite}
+.run-state.running .run-label{color:var(--green)}
+.run-state.idle{background:rgba(108,112,134,0.12);border-color:rgba(108,112,134,0.25)}
+.run-state.idle .dot{background:var(--overlay0)}
+.run-state.idle .run-label{color:var(--subtext1)}
+.run-state.error{background:rgba(249,226,175,0.09);border-color:rgba(249,226,175,0.25)}
+.run-state.error .dot{background:var(--yellow)}
+.run-state.error .run-label{color:var(--yellow)}
+@keyframes pulse{0%,100%{opacity:1}50%{opacity:0.4}}
+
+/* ---- stats ---- */
+.stats{display:grid;grid-template-columns:repeat(4,1fr);gap:11px;margin-bottom:16px}
+.stat{text-align:center;padding:13px 6px;background:rgba(17,17,27,0.32);border:1px solid rgba(203,166,247,0.07);border-radius:13px}
+.stat .v{font-family:var(--mono);font-weight:700;font-size:1.4rem;color:var(--lavender)}
+.stat .l{font-size:0.66rem;color:var(--overlay1);text-transform:uppercase;letter-spacing:0.08em;margin-top:3px}
+.progress{height:7px;background:rgba(17,17,27,0.4);border-radius:99px;overflow:hidden;margin-bottom:16px}
+.progress .fill{height:100%;width:0;border-radius:99px;background:linear-gradient(90deg,var(--mauve),var(--sapphire));transition:width .4s ease}
+
+/* ---- error box ---- */
+.error-box{display:none;align-items:flex-start;gap:9px;padding:11px 13px;border-radius:12px;margin-bottom:16px;
+  background:rgba(243,139,168,0.1);border:1px solid rgba(243,139,168,0.3);color:var(--red);font-size:0.84rem}
+.error-box.show{display:flex}
+.error-box .err-ic{flex:none}
+
+/* ---- forms ---- */
+.field{margin-bottom:15px}
+.field label{display:block;font-size:0.72rem;color:var(--subtext0);text-transform:uppercase;letter-spacing:0.07em;margin-bottom:7px}
+input[type=text],input[type=number],textarea{
+  width:100%;background:rgba(17,17,27,0.42);border:1px solid var(--surface1);border-radius:11px;
+  color:var(--text);padding:11px 13px;font-family:var(--mono);font-size:0.9rem;transition:border-color .2s,box-shadow .2s;
+}
+input::placeholder{color:var(--overlay0)}
+input:focus,textarea:focus{outline:none;border-color:var(--mauve);box-shadow:0 0 0 3px rgba(203,166,247,0.16)}
+textarea{min-height:230px;resize:vertical;line-height:1.7;font-size:0.85rem}
+.two{display:flex;gap:12px}.two .field{flex:1}
+.toggles{display:flex;flex-wrap:wrap;gap:18px;margin:6px 0 4px}
+
+/* ---- switch ---- */
+.switch{display:inline-flex;align-items:center;gap:9px;cursor:pointer;user-select:none}
+.switch input{position:absolute;opacity:0;width:0;height:0}
+.track{width:42px;height:24px;border-radius:99px;background:var(--surface1);position:relative;transition:background .2s;flex:none}
+.thumb{position:absolute;top:3px;left:3px;width:18px;height:18px;border-radius:50%;background:var(--subtext0);transition:transform .2s,background .2s}
+.switch input:checked + .track{background:linear-gradient(135deg,var(--mauve),var(--blue))}
+.switch input:checked + .track .thumb{transform:translateX(18px);background:var(--crust)}
+.switch input:focus-visible + .track{box-shadow:0 0 0 3px rgba(203,166,247,0.25)}
+.switch-label{font-size:0.86rem;color:var(--subtext1)}
+
+/* ---- buttons ---- */
+.btn{display:inline-flex;align-items:center;justify-content:center;gap:7px;padding:11px 18px;border:none;border-radius:12px;
+  font-family:var(--body);font-size:0.88rem;font-weight:600;cursor:pointer;transition:transform .12s,filter .15s,box-shadow .15s;color:var(--crust)}
+.btn:hover{filter:brightness(1.08)}
+.btn:active{transform:translateY(1px)}
+.btn:focus-visible{outline:none;box-shadow:0 0 0 3px rgba(203,166,247,0.3)}
+.btn-primary{background:linear-gradient(135deg,var(--mauve),var(--blue))}
+.btn-start{background:linear-gradient(135deg,var(--green),var(--teal))}
+.btn-danger{background:linear-gradient(135deg,var(--red),var(--peach))}
+.btn-ghost{background:rgba(88,91,112,0.4);color:var(--subtext1)}
+.btn-ghost:hover{background:rgba(88,91,112,0.6);filter:none}
+.btn.sm{padding:8px 13px;font-size:0.8rem}
+.btn.block{width:100%}
+.btn-row{display:flex;gap:11px;flex-wrap:wrap;margin-top:14px}
+
+/* ---- drop zone + files ---- */
+.drop{border:1.5px dashed var(--surface2);border-radius:13px;padding:26px;text-align:center;color:var(--overlay1);
+  font-size:0.86rem;cursor:pointer;transition:border-color .2s,background .2s}
+.drop:hover,.drop.over{border-color:var(--mauve);background:rgba(203,166,247,0.06);color:var(--subtext1)}
+.drop b{color:var(--mauve);font-weight:600}
+input[type=file]{display:none}
+.file-list{margin-top:15px;max-height:300px;overflow-y:auto;display:flex;flex-direction:column;gap:8px}
+.file-item{display:flex;align-items:center;justify-content:space-between;gap:10px;padding:11px 13px;border-radius:12px;cursor:pointer;
+  background:rgba(17,17,27,0.32);border:1px solid rgba(203,166,247,0.07);transition:border-color .15s,background .15s}
+.file-item:hover{background:rgba(49,50,68,0.5)}
+.file-item.active{border-color:var(--mauve);background:rgba(203,166,247,0.1)}
+.file-meta{display:flex;flex-direction:column;min-width:0}
+.file-name{font-family:var(--mono);font-size:0.88rem;font-weight:500;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.file-lines{font-size:0.72rem;color:var(--overlay1)}
+.star{flex:none;background:none;border:none;color:var(--overlay0);font-size:1.1rem;cursor:pointer;padding:4px 6px;border-radius:8px;transition:color .15s,background .15s}
+.star:hover{color:var(--yellow);background:rgba(249,226,175,0.1)}
+.file-item.active .star{color:var(--yellow)}
+
+/* ---- editor ---- */
+#editor-card{display:none}
+#editor-card.show{display:block}
+#editor-name{font-family:var(--mono);color:var(--mauve)}
+
+/* ---- feed ---- */
+.feed{max-height:320px;overflow-y:auto;display:flex;flex-direction:column}
+.feed-item{display:flex;gap:12px;padding:9px 4px;border-bottom:1px solid rgba(203,166,247,0.06);font-family:var(--mono);font-size:0.8rem}
+.feed-item:last-child{border-bottom:none}
+.feed-time{color:var(--sapphire);flex:none}
+.feed-text{color:var(--subtext1);word-break:break-word}
+.empty{color:var(--overlay1);text-align:center;padding:26px 10px;font-size:0.86rem}
+
+/* ---- toasts ---- */
+#toasts{position:fixed;bottom:22px;right:22px;display:flex;flex-direction:column;gap:10px;z-index:60}
+.toast{display:flex;align-items:center;gap:10px;padding:12px 16px;border-radius:13px;font-size:0.85rem;font-weight:500;
+  background:var(--glass);backdrop-filter:blur(18px) saturate(160%);-webkit-backdrop-filter:blur(18px) saturate(160%);
+  border:1px solid var(--glass-line);box-shadow:var(--shadow);color:var(--text);
+  transform:translateX(120%);opacity:0;transition:transform .3s cubic-bezier(.2,.8,.2,1),opacity .3s;max-width:330px}
+.toast.show{transform:translateX(0);opacity:1}
+.toast-dot{width:9px;height:9px;border-radius:50%;flex:none}
+.toast-success .toast-dot{background:var(--green);box-shadow:0 0 8px var(--green)}
+.toast-error .toast-dot{background:var(--red);box-shadow:0 0 8px var(--red)}
+.toast-info .toast-dot{background:var(--blue);box-shadow:0 0 8px var(--blue)}
+
+/* ---- modal ---- */
+#modal{position:fixed;inset:0;z-index:70;display:none;align-items:center;justify-content:center;padding:20px;
+  background:rgba(17,17,27,0.6);backdrop-filter:blur(4px)}
+#modal.open{display:flex}
+.modal-card{width:100%;max-width:400px;padding:24px;background:var(--base);border:1px solid var(--glass-line);border-radius:var(--radius);box-shadow:0 24px 60px rgba(0,0,0,0.5)}
+.modal-title{font-family:var(--display);font-size:1.15rem;font-weight:600;margin-bottom:8px}
+.modal-msg{color:var(--subtext0);font-size:0.88rem;margin-bottom:16px}
+.modal-input{margin-bottom:18px}
+.modal-actions{display:flex;gap:11px;justify-content:flex-end}
+
+::-webkit-scrollbar{width:9px;height:9px}
+::-webkit-scrollbar-track{background:transparent}
+::-webkit-scrollbar-thumb{background:var(--surface1);border-radius:99px}
+::-webkit-scrollbar-thumb:hover{background:var(--surface2)}
+
+@media (max-width:560px){
+  header{flex-direction:column;align-items:stretch}
+  .head-right{align-items:flex-start}
+  .clock{font-size:1.8rem}
+  .stats{grid-template-columns:repeat(2,1fr)}
+}
+</style>
 </head>
 <body>
-    <div class="container">
-        <header>
-            <h1>🚀 Dispatcher</h1>
-            <p>Self-Bot Control Panel — <span id="conn-status">connecting...</span></p>
-        </header>
+<div class="wrap">
+  <header>
+    <div class="brand">
+      <div class="logo">🚀</div>
+      <div>
+        <h1>Dispatcher</h1>
+        <p>message dispatcher</p>
+      </div>
+    </div>
+    <div class="head-right">
+      <div class="clock" id="clock">--:--:--</div>
+      <div class="clock-date" id="clock-date">—</div>
+      <div class="pill pill-off" id="conn"><span class="pill-text">connecting</span></div>
+    </div>
+  </header>
 
-        <div class="grid">
-            <div class="card">
-                <h2>
-                    Status
-                    <span id="status-dot" class="status-indicator"></span>
-                </h2>
-                <div class="stats">
-                    <div class="stat">
-                        <div class="value" id="stat-index">0</div>
-                        <div class="label">Index</div>
-                    </div>
-                    <div class="stat">
-                        <div class="value" id="stat-total">0</div>
-                        <div class="label">Total</div>
-                    </div>
-                    <div class="stat">
-                        <div class="value" id="stat-progress">0%</div>
-                        <div class="label">Progress</div>
-                    </div>
-                </div>
-                <div class="progress-bar">
-                    <div class="fill" id="progress-fill" style="width: 0%"></div>
-                </div>
-                <div id="error-box" class="error-box hidden"></div>
-                <div class="btn-group">
-                    <button class="btn btn-success" id="btn-start" onclick="control('start')">▶ Start</button>
-                    <button class="btn btn-danger" id="btn-stop" onclick="control('stop')">⏹ Stop</button>
-                </div>
-            </div>
-
-            <div class="card">
-                <h2>⚙️ Configuration</h2>
-                <div class="form-group">
-                    <label>Channel ID</label>
-                    <input type="text" id="channel-id" placeholder="123456789012345678">
-                </div>
-                <div class="row">
-                    <div class="form-group">
-                        <label>Delay Min (sec)</label>
-                        <input type="number" id="delay-min" value="6" min="1" step="0.5">
-                    </div>
-                    <div class="form-group">
-                        <label>Delay Max (sec)</label>
-                        <input type="number" id="delay-max" value="7" min="1" step="0.5">
-                    </div>
-                </div>
-                <div class="row" style="margin-top: 10px;">
-                    <label style="display: flex; align-items: center; gap: 8px; cursor: pointer;">
-                        <input type="checkbox" id="loop-check" checked>
-                        <span>Loop</span>
-                    </label>
-                    <label style="display: flex; align-items: center; gap: 8px; cursor: pointer;">
-                        <input type="checkbox" id="feed-check" checked>
-                        <span>Feed</span>
-                    </label>
-                    <label style="display: flex; align-items: center; gap: 8px; cursor: pointer;">
-                        <input type="checkbox" id="autostart-check">
-                        <span>Auto-start</span>
-                    </label>
-                </div>
-                <button class="btn btn-primary" style="width: 100%; margin-top: 15px;" onclick="saveConfig()">💾 Save Config</button>
-            </div>
-        </div>
-
-        <div class="grid">
-            <div class="card">
-                <h2>📁 Message Files</h2>
-                <div class="drop-zone" id="drop-zone" onclick="document.getElementById('file-input').click()">
-                    <p>📎 Click to upload or drop a .txt file here</p>
-                    <input type="file" id="file-input" accept=".txt" onchange="uploadFile(this)">
-                </div>
-                <div class="file-list" id="file-list" style="margin-top: 15px;">
-                    <p class="feed-empty">Loading files...</p>
-                </div>
-                <div class="btn-group">
-                    <button class="btn btn-primary btn-sm" onclick="createNewFile()">➕ New File</button>
-                </div>
-            </div>
-
-            <div class="card" id="editor-card" style="display: none;">
-                <h2>✏️ Editor: <span id="editor-filename">untitled.txt</span></h2>
-                <textarea id="editor-content" placeholder="Enter your messages here, one per line..."></textarea>
-                <div class="btn-group">
-                    <button class="btn btn-success btn-sm" onclick="saveFile()">💾 Save</button>
-                    <button class="btn btn-danger btn-sm" onclick="deleteFile()">🗑 Delete</button>
-                    <button class="btn btn-primary btn-sm" onclick="setActive()">⭐ Set Active</button>
-                    <button class="btn btn-sm" style="background: var(--border);" onclick="closeEditor()">✕ Close</button>
-                </div>
-            </div>
-
-            <div class="card">
-                <h2>📡 Live Feed</h2>
-                <div class="feed" id="feed">
-                    <p class="feed-empty">No messages sent yet.</p>
-                </div>
-            </div>
-        </div>
+  <div class="grid">
+    <!-- status + control -->
+    <div class="card">
+      <h2><span class="ic">📊</span> Status<span class="spacer"></span></h2>
+      <div class="run-state idle" id="run-state">
+        <span class="dot"></span>
+        <span class="run-label">Idle</span>
+        <span class="run-sub" id="updated"></span>
+      </div>
+      <div class="stats">
+        <div class="stat"><div class="v" id="stat-sent">0</div><div class="l">Sent</div></div>
+        <div class="stat"><div class="v" id="stat-total">0</div><div class="l">Total</div></div>
+        <div class="stat"><div class="v" id="stat-progress">0%</div><div class="l">Progress</div></div>
+        <div class="stat"><div class="v" id="stat-rate">—</div><div class="l">Msgs/min</div></div>
+      </div>
+      <div class="progress"><div class="fill" id="progress-fill"></div></div>
+      <div class="error-box" id="error-box"><span class="err-ic">⚠</span><span class="err-text"></span></div>
+      <div class="btn-row">
+        <button class="btn btn-start" onclick="control('start')">▶ Start</button>
+        <button class="btn btn-danger" onclick="control('stop')">⏹ Stop</button>
+      </div>
     </div>
 
-    <script>
-        let currentFile = null;
-        let files = [];
-        let config = {};
+    <!-- configuration -->
+    <div class="card">
+      <h2><span class="ic">⚙️</span> Configuration</h2>
+      <div class="field">
+        <label>Channel ID</label>
+        <input type="text" id="channel-id" placeholder="550390090665295892">
+      </div>
+      <div class="two">
+        <div class="field"><label>Delay min (s)</label><input type="number" id="delay-min" value="6" min="1" step="0.5"></div>
+        <div class="field"><label>Delay max (s)</label><input type="number" id="delay-max" value="7" min="1" step="0.5"></div>
+      </div>
+      <div class="toggles">
+        <label class="switch"><input type="checkbox" id="loop-check"><span class="track"><span class="thumb"></span></span><span class="switch-label">Loop</span></label>
+        <label class="switch"><input type="checkbox" id="feed-check"><span class="track"><span class="thumb"></span></span><span class="switch-label">Feed</span></label>
+        <label class="switch"><input type="checkbox" id="autostart-check"><span class="track"><span class="thumb"></span></span><span class="switch-label">Auto-start</span></label>
+      </div>
+      <button class="btn btn-primary block" style="margin-top:14px" onclick="saveConfig()">Save settings</button>
+    </div>
+  </div>
 
-        setInterval(fetchStatus, 1000);
-        setInterval(fetchFiles, 5000);
-        fetchStatus();
-        fetchFiles();
-        fetchConfig();
+  <div class="grid">
+    <!-- files -->
+    <div class="card">
+      <h2><span class="ic">📁</span> Message files</h2>
+      <div class="drop" id="drop" onclick="document.getElementById('file-input').click()">
+        <b>Click to upload</b> or drop a .txt file
+        <input type="file" id="file-input" accept=".txt" onchange="uploadFile(this)">
+      </div>
+      <div class="file-list" id="file-list"><p class="empty">Loading files…</p></div>
+      <div class="btn-row"><button class="btn btn-ghost sm" onclick="createNewFile()">＋ New file</button></div>
+    </div>
 
-        async function fetchStatus() {
-            try {
-                const res = await fetch('/api/status');
-                const data = await res.json();
-                updateStatus(data);
-            } catch (e) {
-                document.getElementById('conn-status').textContent = 'disconnected';
-                document.getElementById('conn-status').style.color = 'var(--danger)';
-            }
-        }
+    <!-- editor -->
+    <div class="card" id="editor-card">
+      <h2><span class="ic">✏️</span> Editing&nbsp;<span id="editor-name">untitled.txt</span></h2>
+      <textarea id="editor-content" placeholder="One message per line…"></textarea>
+      <div class="btn-row">
+        <button class="btn btn-start sm" onclick="saveFile()">Save</button>
+        <button class="btn btn-primary sm" onclick="setActive()">Set active</button>
+        <button class="btn btn-danger sm" onclick="deleteFile()">Delete</button>
+        <button class="btn btn-ghost sm" onclick="closeEditor()">Close</button>
+      </div>
+    </div>
 
-        async function fetchConfig() {
-            try {
-                const res = await fetch('/api/config');
-                config = await res.json();
-                document.getElementById('channel-id').value = config.channel_id || '';
-                document.getElementById('delay-min').value = config.delay_min;
-                document.getElementById('delay-max').value = config.delay_max;
-                document.getElementById('loop-check').checked = config.loop;
-                document.getElementById('feed-check').checked = config.feed;
-                document.getElementById('autostart-check').checked = config.autostart;
-            } catch (e) { console.error('fetchConfig:', e); }
-        }
+    <!-- feed -->
+    <div class="card">
+      <h2><span class="ic">📡</span> Live feed</h2>
+      <div class="feed" id="feed"><p class="empty">Nothing sent yet. Hit Start to begin.</p></div>
+    </div>
+  </div>
+</div>
 
-        async function fetchFiles() {
-            try {
-                const res = await fetch('/api/files');
-                const data = await res.json();
-                files = data.files;
-                renderFiles();
-            } catch (e) { console.error('fetchFiles:', e); }
-        }
+<div id="toasts"></div>
+<div id="modal"></div>
 
-        function updateStatus(data) {
-            document.getElementById('conn-status').textContent = data.connected ? 'connected' : 'disconnected';
-            document.getElementById('conn-status').style.color = data.connected ? 'var(--success)' : 'var(--danger)';
+<script>
+let currentFile=null, files=[], config={}, activeFile=null;
 
-            const dot = document.getElementById('status-dot');
-            if (data.running) {
-                dot.className = 'status-indicator on';
-            } else if (data.error) {
-                dot.className = 'status-indicator warn';
-            } else {
-                dot.className = 'status-indicator';
-            }
+/* ---- clock ---- */
+function tickClock(){
+  const n=new Date();
+  document.getElementById('clock').textContent=n.toLocaleTimeString('en-GB',{hour12:false});
+  document.getElementById('clock-date').textContent=n.toLocaleDateString('en-GB',{weekday:'short',day:'2-digit',month:'short'});
+}
+setInterval(tickClock,1000); tickClock();
 
-            document.getElementById('stat-index').textContent = data.index || 0;
-            document.getElementById('stat-total').textContent = data.total || 0;
-            const pct = data.total ? Math.round((data.index / data.total) * 100) : 0;
-            document.getElementById('stat-progress').textContent = pct + '%';
-            document.getElementById('progress-fill').style.width = pct + '%';
+/* ---- helpers ---- */
+function escapeAttr(s){return String(s).replace(/&/g,'&amp;').replace(/"/g,'&quot;');}
+function toast(msg,type='info'){
+  const w=document.getElementById('toasts');
+  const el=document.createElement('div');
+  el.className='toast toast-'+type;
+  el.innerHTML='<span class="toast-dot"></span><span class="toast-msg"></span>';
+  el.querySelector('.toast-msg').textContent=msg;
+  w.appendChild(el);
+  requestAnimationFrame(()=>el.classList.add('show'));
+  setTimeout(()=>{el.classList.remove('show');setTimeout(()=>el.remove(),320);},3200);
+}
+function modal(opts){
+  return new Promise(resolve=>{
+    const ov=document.getElementById('modal'); ov.innerHTML='';
+    const card=document.createElement('div'); card.className='modal-card';
+    card.innerHTML=
+      '<h3 class="modal-title"></h3>'+
+      (opts.message?'<p class="modal-msg"></p>':'')+
+      (opts.input?'<input class="modal-input" type="text">':'')+
+      '<div class="modal-actions"><button class="btn btn-ghost" data-act="cancel">Cancel</button>'+
+      '<button class="btn '+(opts.danger?'btn-danger':'btn-primary')+'" data-act="ok"></button></div>';
+    card.querySelector('.modal-title').textContent=opts.title||'';
+    if(opts.message) card.querySelector('.modal-msg').textContent=opts.message;
+    card.querySelector('[data-act=ok]').textContent=opts.okLabel||'Confirm';
+    const inp=card.querySelector('.modal-input');
+    if(inp){inp.placeholder=opts.placeholder||'';inp.value=opts.value||'';}
+    ov.appendChild(card); ov.classList.add('open');
+    if(inp){inp.focus();inp.select();}
+    function close(r){ov.classList.remove('open');setTimeout(()=>ov.innerHTML='',200);resolve(r);}
+    card.querySelector('[data-act=cancel]').onclick=()=>close(null);
+    card.querySelector('[data-act=ok]').onclick=()=>close(inp?inp.value.trim():true);
+    ov.onclick=e=>{if(e.target===ov)close(null);};
+    if(inp)inp.onkeydown=e=>{if(e.key==='Enter')close(inp.value.trim());if(e.key==='Escape')close(null);};
+  });
+}
 
-            const errBox = document.getElementById('error-box');
-            if (data.error) {
-                errBox.textContent = '⚠️ ' + data.error;
-                errBox.classList.remove('hidden');
-            } else {
-                errBox.classList.add('hidden');
-            }
+/* ---- polling ---- */
+setInterval(fetchStatus,1000);
+setInterval(fetchFiles,5000);
+fetchStatus(); fetchFiles(); fetchConfig();
 
-            const feedEl = document.getElementById('feed');
-            if (data.feed && data.feed.length > 0) {
-                feedEl.innerHTML = data.feed.slice().reverse().map(item => `
-                    <div class="feed-item">
-                        <span class="time">${item.t}</span>
-                        <span class="text">${escapeHtml(item.text)}</span>
-                    </div>
-                `).join('');
-            } else {
-                feedEl.innerHTML = '<p class="feed-empty">No messages sent yet.</p>';
-            }
+async function fetchStatus(){
+  try{const r=await fetch('/api/status');updateStatus(await r.json());}
+  catch(e){const p=document.getElementById('conn');p.className='pill pill-off';p.querySelector('.pill-text').textContent='disconnected';}
+}
+async function fetchConfig(){
+  try{
+    const r=await fetch('/api/config'); config=await r.json();
+    document.getElementById('channel-id').value=config.channel_id||'';
+    document.getElementById('delay-min').value=config.delay_min;
+    document.getElementById('delay-max').value=config.delay_max;
+    document.getElementById('loop-check').checked=!!config.loop;
+    document.getElementById('feed-check').checked=!!config.feed;
+    document.getElementById('autostart-check').checked=!!config.autostart;
+    updateRate();
+  }catch(e){}
+}
+async function fetchFiles(){
+  try{const r=await fetch('/api/files');files=(await r.json()).files;renderFiles();}catch(e){}
+}
 
-            if (data.active_file) {
-                document.querySelectorAll('.file-item').forEach(el => {
-                    el.classList.toggle('active', el.dataset.name === data.active_file);
-                });
-            }
-        }
+function updateRate(){
+  const a=(parseFloat(document.getElementById('delay-min').value)||6),
+        b=(parseFloat(document.getElementById('delay-max').value)||7),
+        avg=(a+b)/2;
+  document.getElementById('stat-rate').textContent=avg>0?(60/avg).toFixed(1):'—';
+}
+['delay-min','delay-max'].forEach(id=>document.getElementById(id).addEventListener('input',updateRate));
 
-        function renderFiles() {
-            const list = document.getElementById('file-list');
-            if (files.length === 0) {
-                list.innerHTML = '<p class="feed-empty">No files yet. Upload or create one.</p>';
-                return;
-            }
-            list.innerHTML = files.map(f => `
-                <div class="file-item" data-name="${f.name}" onclick="openFile('${f.name}')">
-                    <div>
-                        <div class="name">${f.name}</div>
-                        <div class="meta">${f.lines} lines</div>
-                    </div>
-                    <div class="actions" onclick="event.stopPropagation()">
-                        <button class="btn btn-primary btn-sm" onclick="quickSetActive('${f.name}')">⭐</button>
-                    </div>
-                </div>
-            `).join('');
-        }
+function updateStatus(d){
+  const p=document.getElementById('conn'); const on=!!d.connected;
+  p.className='pill '+(on?'pill-on':'pill-off');
+  p.querySelector('.pill-text').textContent=on?(d.bot_name||'connected'):'disconnected';
 
-        async function openFile(name) {
-            try {
-                const res = await fetch(`/api/file/${encodeURIComponent(name)}`);
-                const data = await res.json();
-                currentFile = data.name;
-                document.getElementById('editor-filename').textContent = data.name;
-                document.getElementById('editor-content').value = data.content;
-                document.getElementById('editor-card').style.display = 'block';
-            } catch (e) { alert('Failed to load file'); }
-        }
+  const st=document.getElementById('run-state');
+  if(d.running){st.className='run-state running';st.querySelector('.run-label').textContent='Sending';}
+  else if(d.error){st.className='run-state error';st.querySelector('.run-label').textContent='Stopped';}
+  else{st.className='run-state idle';st.querySelector('.run-label').textContent='Idle';}
+  document.getElementById('updated').textContent=d.updated?('bot clock '+d.updated):'';
 
-        function closeEditor() {
-            document.getElementById('editor-card').style.display = 'none';
-            currentFile = null;
-        }
+  const idx=d.index||0,tot=d.total||0,pct=tot?Math.round(idx/tot*100):0;
+  document.getElementById('stat-sent').textContent=idx;
+  document.getElementById('stat-total').textContent=tot;
+  document.getElementById('stat-progress').textContent=pct+'%';
+  document.getElementById('progress-fill').style.width=pct+'%';
 
-        async function saveFile() {
-            if (!currentFile) return;
-            const content = document.getElementById('editor-content').value;
-            try {
-                await fetch(`/api/file/${encodeURIComponent(currentFile)}`, {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ content })
-                });
-                fetchFiles();
-            } catch (e) { alert('Failed to save'); }
-        }
+  const eb=document.getElementById('error-box');
+  if(d.error){eb.querySelector('.err-text').textContent=d.error;eb.classList.add('show');}
+  else eb.classList.remove('show');
 
-        async function deleteFile() {
-            if (!currentFile) return;
-            if (!confirm(`Delete ${currentFile}?`)) return;
-            try {
-                await fetch(`/api/file/${encodeURIComponent(currentFile)}`, { method: 'DELETE' });
-                closeEditor();
-                fetchFiles();
-            } catch (e) { alert('Failed to delete'); }
-        }
+  const feed=document.getElementById('feed');
+  if(d.feed&&d.feed.length){
+    const arr=d.feed.slice().reverse();
+    feed.innerHTML=arr.map(()=>'<div class="feed-item"><span class="feed-time"></span><span class="feed-text"></span></div>').join('');
+    feed.querySelectorAll('.feed-item').forEach((el,i)=>{el.querySelector('.feed-time').textContent=arr[i].t;el.querySelector('.feed-text').textContent=arr[i].text;});
+  }else feed.innerHTML='<p class="empty">Nothing sent yet. Hit Start to begin.</p>';
 
-        async function setActive() {
-            if (!currentFile) return;
-            await saveConfig(currentFile);
-        }
+  if(d.active_file){activeFile=d.active_file;document.querySelectorAll('.file-item').forEach(el=>el.classList.toggle('active',el.dataset.name===activeFile));}
+}
 
-        async function quickSetActive(name) {
-            await saveConfig(name);
-        }
+function renderFiles(){
+  const list=document.getElementById('file-list');
+  if(!files.length){list.innerHTML='<p class="empty">No files yet — upload a .txt or create one.</p>';return;}
+  list.innerHTML=files.map(f=>
+    '<div class="file-item'+(f.name===activeFile?' active':'')+'" data-name="'+escapeAttr(f.name)+'">'+
+      '<div class="file-meta"><span class="file-name"></span><span class="file-lines">'+f.lines+' lines</span></div>'+
+      '<button class="star" data-star="'+escapeAttr(f.name)+'" title="Set active">★</button>'+
+    '</div>').join('');
+  list.querySelectorAll('.file-item').forEach(el=>{el.querySelector('.file-name').textContent=el.dataset.name;});
+}
+document.getElementById('file-list').addEventListener('click',e=>{
+  const star=e.target.closest('[data-star]');
+  if(star){e.stopPropagation();quickSetActive(star.dataset.star);return;}
+  const item=e.target.closest('.file-item');
+  if(item)openFile(item.dataset.name);
+});
 
-        async function saveConfig(activeFile = null) {
-            const payload = {
-                channel_id: document.getElementById('channel-id').value,
-                delay_min: parseFloat(document.getElementById('delay-min').value),
-                delay_max: parseFloat(document.getElementById('delay-max').value),
-                loop: document.getElementById('loop-check').checked,
-                feed: document.getElementById('feed-check').checked,
-                autostart: document.getElementById('autostart-check').checked,
-            };
-            if (activeFile) payload.active_file = activeFile;
+async function openFile(name){
+  try{
+    const r=await fetch('/api/file/'+encodeURIComponent(name)); if(!r.ok)throw 0;
+    const d=await r.json(); currentFile=d.name;
+    document.getElementById('editor-name').textContent=d.name;
+    document.getElementById('editor-content').value=d.content;
+    const card=document.getElementById('editor-card'); card.classList.add('show');
+    card.scrollIntoView({behavior:'smooth',block:'nearest'});
+  }catch(e){toast('Could not open file','error');}
+}
+function closeEditor(){document.getElementById('editor-card').classList.remove('show');currentFile=null;}
 
-            try {
-                await fetch('/api/config', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify(payload)
-                });
-                fetchConfig();
-                fetchFiles();
-            } catch (e) { alert('Failed to save config'); }
-        }
+async function saveFile(){
+  if(!currentFile)return;
+  try{
+    await fetch('/api/file/'+encodeURIComponent(currentFile),{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({content:document.getElementById('editor-content').value})});
+    toast('Saved '+currentFile,'success'); fetchFiles();
+  }catch(e){toast('Could not save file','error');}
+}
+async function deleteFile(){
+  if(!currentFile)return;
+  const ok=await modal({title:'Delete this file?',message:'"'+currentFile+'" will be removed. This can\'t be undone.',okLabel:'Delete',danger:true});
+  if(!ok)return;
+  try{await fetch('/api/file/'+encodeURIComponent(currentFile),{method:'DELETE'});toast('Deleted '+currentFile,'info');closeEditor();fetchFiles();}
+  catch(e){toast('Could not delete file','error');}
+}
+function setActive(){if(currentFile)saveConfig(currentFile);}
+function quickSetActive(name){saveConfig(name);}
 
-        async function createNewFile() {
-            const name = prompt('Enter filename (without .txt):');
-            if (!name) return;
-            const fullName = name.endsWith('.txt') ? name : name + '.txt';
-            try {
-                await fetch(`/api/file/${encodeURIComponent(fullName)}`, {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ content: '' })
-                });
-                fetchFiles();
-                openFile(fullName);
-            } catch (e) { alert('Failed to create file'); }
-        }
+async function createNewFile(){
+  const name=await modal({title:'New message file',input:true,placeholder:'e.g. jokes',okLabel:'Create'});
+  if(!name)return;
+  const full=name.endsWith('.txt')?name:name+'.txt';
+  try{
+    await fetch('/api/file/'+encodeURIComponent(full),{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({content:''})});
+    toast('Created '+full,'success'); fetchFiles(); openFile(full);
+  }catch(e){toast('Could not create file','error');}
+}
 
-        async function uploadFile(input) {
-            const file = input.files[0];
-            if (!file) return;
-            const form = new FormData();
-            form.append('file', file);
-            try {
-                await fetch('/api/upload', { method: 'POST', body: form });
-                input.value = '';
-                fetchFiles();
-            } catch (e) { alert('Failed to upload'); }
-        }
+async function uploadFile(input){
+  const file=input.files[0]; if(!file)return;
+  const form=new FormData(); form.append('file',file);
+  try{await fetch('/api/upload',{method:'POST',body:form});input.value='';toast('Uploaded '+file.name,'success');fetchFiles();}
+  catch(e){toast('Upload failed','error');}
+}
 
-        async function control(action) {
-            try {
-                const res = await fetch('/api/control', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ action })
-                });
-                const data = await res.json();
-                if (!data.ok) alert(data.error);
-                fetchStatus();
-            } catch (e) { alert('Control failed'); }
-        }
+async function saveConfig(activeFileName=null){
+  const payload={
+    channel_id:document.getElementById('channel-id').value,
+    delay_min:parseFloat(document.getElementById('delay-min').value),
+    delay_max:parseFloat(document.getElementById('delay-max').value),
+    loop:document.getElementById('loop-check').checked,
+    feed:document.getElementById('feed-check').checked,
+    autostart:document.getElementById('autostart-check').checked,
+  };
+  if(activeFileName)payload.active_file=activeFileName;
+  try{
+    await fetch('/api/config',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)});
+    toast(activeFileName?('Active file → '+activeFileName):'Settings saved','success');
+    fetchConfig(); fetchFiles();
+  }catch(e){toast('Could not save settings','error');}
+}
 
-        function escapeHtml(text) {
-            const div = document.createElement('div');
-            div.textContent = text;
-            return div.innerHTML;
-        }
+async function control(action){
+  try{
+    const r=await fetch('/api/control',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({action})});
+    const d=await r.json();
+    if(!d.ok)toast(d.error||'Action failed','error');
+    else toast(action==='start'?'Sending started':'Sending stopped',action==='start'?'success':'info');
+    fetchStatus();
+  }catch(e){toast('Action failed','error');}
+}
 
-        const dropZone = document.getElementById('drop-zone');
-        dropZone.addEventListener('dragover', (e) => { e.preventDefault(); dropZone.classList.add('dragover'); });
-        dropZone.addEventListener('dragleave', () => dropZone.classList.remove('dragover'));
-        dropZone.addEventListener('drop', (e) => {
-            e.preventDefault();
-            dropZone.classList.remove('dragover');
-            const file = e.dataTransfer.files[0];
-            if (file && file.name.endsWith('.txt')) {
-                const input = document.getElementById('file-input');
-                const dt = new DataTransfer();
-                dt.items.add(file);
-                input.files = dt.files;
-                uploadFile(input);
-            }
-        });
-    </script>
+/* ---- drag & drop ---- */
+const drop=document.getElementById('drop');
+drop.addEventListener('dragover',e=>{e.preventDefault();drop.classList.add('over');});
+drop.addEventListener('dragleave',()=>drop.classList.remove('over'));
+drop.addEventListener('drop',e=>{
+  e.preventDefault();drop.classList.remove('over');
+  const file=e.dataTransfer.files[0];
+  if(file&&file.name.endsWith('.txt')){const inp=document.getElementById('file-input');const dt=new DataTransfer();dt.items.add(file);inp.files=dt.files;uploadFile(inp);}
+  else toast('Only .txt files are supported','error');
+});
+</script>
 </body>
 </html>
+
 """
 
 
@@ -862,7 +827,7 @@ def healthz():
 
 @app.get("/")
 def index():
-    return render_template_string(DASHBOARD_HTML)
+    return DASHBOARD_HTML
 
 
 @app.get("/api/files")
@@ -980,15 +945,24 @@ def main():
     if not CONFIG.exists():
         write_config(dict(DEFAULT_CONFIG))
 
+    cfg = read_config()
+
+    # CHANNEL_ID env var pins the channel so it survives Render's disk wipes on
+    # redeploy. When set (and numeric), it overrides the saved value on boot.
+    env_channel = os.getenv("CHANNEL_ID", "").strip()
+    if env_channel.isdigit():
+        cfg["channel_id"] = int(env_channel)
+        print(f"Channel ID pinned from CHANNEL_ID env: {env_channel}")
+
     # Auto-start: if enabled and prerequisites are set, begin posting on boot.
     # Re-applies on every process start (e.g. after a Render restart), so the
     # bot resumes by itself. A manual Stop during a session still sticks,
     # because this runs once at boot — not on reconnects.
-    cfg = read_config()
     if cfg.get("autostart") and cfg.get("active_file") and cfg.get("channel_id"):
         cfg["running"] = True
-        write_config(cfg)
         print("Auto-start enabled — posting begins once connected.")
+
+    write_config(cfg)
 
     threading.Thread(target=run_flask, daemon=True).start()
     port = os.getenv("PORT", "5000")
