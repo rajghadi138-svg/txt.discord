@@ -51,6 +51,7 @@ _lock = threading.Lock()
 
 DEFAULT_CONFIG = {
     "channel_id": None,
+    "rank_channel_id": None,
     "active_file": None,
     "delay_min": 6.0,
     "delay_max": 7.0,
@@ -526,6 +527,10 @@ input[type=file]{display:none}
         <label>Channel ID</label>
         <input type="text" id="channel-id" placeholder="550390090665295892">
       </div>
+      <div class="field">
+        <label>Rank-check channel</label>
+        <input type="text" id="rank-channel-id" placeholder="optional — for /rank checks">
+      </div>
       <div class="two">
         <div class="field"><label>Delay min (s)</label><input type="number" id="delay-min" value="6" min="1" step="0.5"></div>
         <div class="field"><label>Delay max (s)</label><input type="number" id="delay-max" value="7" min="1" step="0.5"></div>
@@ -635,6 +640,7 @@ async function fetchConfig(){
   try{
     const r=await fetch('/api/config'); config=await r.json();
     document.getElementById('channel-id').value=config.channel_id||'';
+    document.getElementById('rank-channel-id').value=config.rank_channel_id||'';
     document.getElementById('delay-min').value=config.delay_min;
     document.getElementById('delay-max').value=config.delay_max;
     document.getElementById('loop-check').checked=!!config.loop;
@@ -752,6 +758,7 @@ async function uploadFile(input){
 async function saveConfig(activeFileName=null){
   const payload={
     channel_id:document.getElementById('channel-id').value,
+    rank_channel_id:document.getElementById('rank-channel-id').value,
     delay_min:parseFloat(document.getElementById('delay-min').value),
     delay_max:parseFloat(document.getElementById('delay-max').value),
     loop:document.getElementById('loop-check').checked,
@@ -891,6 +898,9 @@ def api_config_set():
     if "channel_id" in data:
         raw = str(data["channel_id"]).strip()
         cfg["channel_id"] = int(raw) if raw.isdigit() else None
+    if "rank_channel_id" in data:
+        raw = str(data["rank_channel_id"]).strip()
+        cfg["rank_channel_id"] = int(raw) if raw.isdigit() else None
     if "active_file" in data:
         cfg["active_file"] = safe_name(data["active_file"]) if data["active_file"] else None
     for key in ("delay_min", "delay_max"):
@@ -946,13 +956,6 @@ def main():
         write_config(dict(DEFAULT_CONFIG))
 
     cfg = read_config()
-
-    # CHANNEL_ID env var pins the channel so it survives Render's disk wipes on
-    # redeploy. When set (and numeric), it overrides the saved value on boot.
-    env_channel = os.getenv("CHANNEL_ID", "").strip()
-    if env_channel.isdigit():
-        cfg["channel_id"] = int(env_channel)
-        print(f"Channel ID pinned from CHANNEL_ID env: {env_channel}")
 
     # Auto-start: if enabled and prerequisites are set, begin posting on boot.
     # Re-applies on every process start (e.g. after a Render restart), so the
